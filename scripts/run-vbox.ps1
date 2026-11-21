@@ -1,4 +1,4 @@
-﻿# scripts/run-vbox.ps1
+# scripts/run-vbox.ps1
 # ---------------------------------------------------------------------------
 # Sets up and runs MyOS in VirtualBox 7.x using the downloaded ISO.
 #
