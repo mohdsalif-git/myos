@@ -10,7 +10,10 @@ pub type EfiHandle = *mut core::ffi::c_void;
 pub type Char16 = u16;
 
 pub const EFI_SUCCESS: EfiStatus = 0;
+pub const EFI_LOAD_ERROR: EfiStatus = 0x8000_0000_0000_0001;
+pub const EFI_INVALID_PARAMETER: EfiStatus = 0x8000_0000_0000_0002;
 pub const EFI_UNSUPPORTED: EfiStatus = 0x8000_0000_0000_0003;
+pub const EFI_NOT_FOUND: EfiStatus = 0x8000_0000_0000_000E;
 
 // ── EFI_GUID (UEFI Spec §Appendix A) ────────────────────────────────────────
 #[repr(C)]
@@ -28,6 +31,30 @@ pub const EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID: EfiGuid = EfiGuid {
     data2: 0x23dc,
     data3: 0x4a38,
     data4: [0x96, 0xfb, 0x7a, 0xde, 0xd0, 0x80, 0x51, 0x6a],
+};
+
+// EFI_LOADED_IMAGE_PROTOCOL_GUID: {5b1b31a1-9562-11d2-8e3f-00a0c969723b}
+pub const EFI_LOADED_IMAGE_PROTOCOL_GUID: EfiGuid = EfiGuid {
+    data1: 0x5b1b31a1,
+    data2: 0x9562,
+    data3: 0x11d2,
+    data4: [0x8e, 0x3f, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b],
+};
+
+// EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID: {964e5b22-6459-11d2-8e39-00a0c969723b}
+pub const EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID: EfiGuid = EfiGuid {
+    data1: 0x964e5b22,
+    data2: 0x6459,
+    data3: 0x11d2,
+    data4: [0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b],
+};
+
+// EFI_FILE_INFO_ID: {09576e92-6d3f-11d2-8e39-00a0c969723b}
+pub const EFI_FILE_INFO_ID: EfiGuid = EfiGuid {
+    data1: 0x09576e92,
+    data2: 0x6d3f,
+    data3: 0x11d2,
+    data4: [0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b],
 };
 
 // ── EFI_TABLE_HEADER (UEFI Spec §4.2) ───────────────────────────────────────
@@ -102,6 +129,86 @@ pub struct EfiGraphicsOutputProtocol {
     ) -> EfiStatus,
     pub mode: *mut EfiGraphicsOutputProtocolMode,
 }
+
+// ── EFI_LOADED_IMAGE_PROTOCOL (UEFI Spec §9.1) ──────────────────────────────
+#[repr(C)]
+pub struct EfiLoadedImageProtocol {
+    pub revision: u32,
+    pub parent_handle: EfiHandle,
+    pub system_table: *mut core::ffi::c_void,
+    pub device_handle: EfiHandle,
+    pub file_path: *mut core::ffi::c_void,
+    pub reserved: *mut core::ffi::c_void,
+    pub load_options_size: u32,
+    pub load_options: *mut core::ffi::c_void,
+    pub image_base: *mut core::ffi::c_void,
+    pub image_size: u64,
+    pub image_code_type: u32,
+    pub image_data_type: u32,
+    pub unload: unsafe extern "efiapi" fn(EfiHandle) -> EfiStatus,
+}
+
+// ── EFI_FILE_PROTOCOL (UEFI Spec §13.5) ─────────────────────────────────────
+pub const EFI_FILE_MODE_READ: u64 = 0x0000_0000_0000_0001;
+
+#[repr(C)]
+pub struct EfiFileProtocol {
+    pub revision: u64,
+    pub open: unsafe extern "efiapi" fn(
+        *mut Self,
+        *mut *mut EfiFileProtocol,
+        *const Char16,
+        u64,
+        u64,
+    ) -> EfiStatus,
+    pub close: unsafe extern "efiapi" fn(*mut Self) -> EfiStatus,
+    pub delete: unsafe extern "efiapi" fn(*mut Self) -> EfiStatus,
+    pub read: unsafe extern "efiapi" fn(*mut Self, *mut usize, *mut core::ffi::c_void) -> EfiStatus,
+    pub write: unsafe extern "efiapi" fn(*mut Self, *mut usize, *const core::ffi::c_void) -> EfiStatus,
+    pub get_position: unsafe extern "efiapi" fn(*mut Self, *mut u64) -> EfiStatus,
+    pub set_position: unsafe extern "efiapi" fn(*mut Self, u64) -> EfiStatus,
+    pub get_info: unsafe extern "efiapi" fn(
+        *mut Self,
+        *const EfiGuid,
+        *mut usize,
+        *mut core::ffi::c_void,
+    ) -> EfiStatus,
+    pub set_info: unsafe extern "efiapi" fn(
+        *mut Self,
+        *const EfiGuid,
+        usize,
+        *const core::ffi::c_void,
+    ) -> EfiStatus,
+    pub flush: unsafe extern "efiapi" fn(*mut Self) -> EfiStatus,
+}
+
+// ── EFI_SIMPLE_FILE_SYSTEM_PROTOCOL (UEFI Spec §13.4) ───────────────────────
+#[repr(C)]
+pub struct EfiSimpleFileSystemProtocol {
+    pub revision: u64,
+    pub open_volume: unsafe extern "efiapi" fn(*mut Self, *mut *mut EfiFileProtocol) -> EfiStatus,
+}
+
+// ── EFI_FILE_INFO (UEFI Spec §13.5.16) ──────────────────────────────────────
+#[repr(C)]
+pub struct EfiFileInfo {
+    pub size: u64,
+    pub file_size: u64,
+    pub physical_size: u64,
+    pub create_time: [u8; 16],
+    pub last_access_time: [u8; 16],
+    pub modification_time: [u8; 16],
+    pub attribute: u64,
+    // Variable length file_name (Char16) follows
+}
+
+// ── Memory Allocation Types (UEFI Spec §7.2) ────────────────────────────────
+pub const EFI_ALLOCATE_ANY_PAGES: u32 = 0;
+pub const EFI_ALLOCATE_MAX_ADDRESS: u32 = 1;
+pub const EFI_ALLOCATE_ADDRESS: u32 = 2;
+
+pub const EFI_LOADER_CODE: u32 = 1;
+pub const EFI_LOADER_DATA: u32 = 2;
 
 // ── EFI_BOOT_SERVICES (UEFI Spec §7.1, Table 7-1 in exact declaration order) ─
 #[repr(C)]

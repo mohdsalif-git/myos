@@ -15,11 +15,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 2. Install Rust stable + UEFI target ─────────────────────────────
+      # 2. Install Rust stable + UEFI and Bare-metal ELF targets ─────────
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-uefi
+          targets: x86_64-unknown-uefi, x86_64-unknown-none
 
       # 3. Cache Cargo registry and build artifacts ───────────────────────
       - name: Cache Cargo
@@ -31,49 +31,48 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-      # 4. Build the bootloader as a UEFI PE32+ binary ───────────────────
-      - name: Build bootloader (debug)
-        run: cargo build -p bootloader --target x86_64-unknown-uefi
+      # 4. Build the kernel stub as a static-PIE ELF64 ───────────────────
+      - name: Build kernel stub (release static-PIE ELF64)
+        run: |
+          RUSTFLAGS="-C relocation-model=pie" cargo build -p kernel-stub --target x86_64-unknown-none --release
 
-      # 5. Build release binary too (smaller, optimized) ─────────────────
+      # 5. Build the bootloader as a UEFI PE32+ binary ───────────────────
       - name: Build bootloader (release)
         run: cargo build -p bootloader --target x86_64-unknown-uefi --release
 
       # 6. Create the ESP FAT32 disk image ───────────────────────────────
       # Layout (UEFI Spec §3.5.1.1 — fallback boot path):
-      #   /EFI/BOOT/BOOTX64.EFI   ← firmware looks here by default
-      #   /EFI/MYOS/              ← future: kernel.elf, kernel.sig, boot.cfg
+      #   /EFI/BOOT/BOOTX64.EFI   <- firmware looks here by default
+      #   /EFI/MYOS/KERNEL.ELF    <- Stage 2 kernel ELF binary
       - name: Create ESP image (64 MiB FAT32)
         run: |
           sudo apt-get install -y dosfstools mtools xorriso
-          # Create output directory FIRST — dd fails silently if dir is missing
           mkdir -p build
           # Create 64 MiB blank image
           dd if=/dev/zero of=build/esp.img bs=1M count=64
           # Format as FAT32
           mkfs.fat -F 32 -n "MYOS_ESP" build/esp.img
-          # Create EFI directory structure and copy bootloader
+          # Create EFI directory structure
           mkdir -p build/esp_root/EFI/BOOT
           mkdir -p build/esp_root/EFI/MYOS
+          # Copy bootloader to fallback path
           cp target/x86_64-unknown-uefi/release/bootloader.efi \
              build/esp_root/EFI/BOOT/BOOTX64.EFI
-          # Copy files into FAT32 image using mcopy (no mount needed, no root)
+          # Copy kernel ELF to /EFI/MYOS/KERNEL.ELF
+          cp target/x86_64-unknown-none/release/kernel-stub \
+             build/esp_root/EFI/MYOS/KERNEL.ELF
+          # Copy files into FAT32 image using mcopy
           mcopy -i build/esp.img -s build/esp_root/EFI ::/EFI
           # Verify the image structure
-          mdir -i build/esp.img ::/EFI/BOOT/
+          mdir -i build/esp.img ::/EFI/MYOS/
 
       # 7. Create a bootable ISO (El Torito UEFI variant) ─────────────────
-      # El Torito for UEFI embeds the ESP FAT32 image as the boot image.
-      # This is distinct from legacy BIOS El Torito (which we forbid in spec).
-      # Reference: UEFI Spec §3.3 "Boot from Optical Discs"
-      #            El Torito 1.0 Specification + UEFI extension
-      #
-      # xorriso -eltorito-alt-boot -e EFI/BOOT/bootx64.img -no-emul-boot
-      # tells the firmware to boot from the embedded ESP image (no floppy emulation).
       - name: Package as bootable ISO (UEFI El Torito)
         run: |
           mkdir -p build/iso_root/EFI/BOOT
+          mkdir -p build/iso_root/EFI/MYOS
           cp build/esp_root/EFI/BOOT/BOOTX64.EFI build/iso_root/EFI/BOOT/BOOTX64.EFI
+          cp build/esp_root/EFI/MYOS/KERNEL.ELF build/iso_root/EFI/MYOS/KERNEL.ELF
           # Embed the ESP image as the UEFI El Torito boot image
           cp build/esp.img build/iso_root/EFI/BOOT/bootx64.img
           xorriso -as mkisofs \
