@@ -46,6 +46,8 @@ jobs:
       - name: Create ESP image (64 MiB FAT32)
         run: |
           sudo apt-get install -y dosfstools mtools xorriso
+          # Create output directory FIRST — dd fails silently if dir is missing
+          mkdir -p build
           # Create 64 MiB blank image
           dd if=/dev/zero of=build/esp.img bs=1M count=64
           # Format as FAT32
