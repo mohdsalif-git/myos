@@ -5,6 +5,7 @@
 // Permissive / Public Domain standard 8x16 BIOS font subset covering printable ASCII.
 
 pub const FONT_WIDTH: usize = 8;
+#[allow(dead_code)]
 pub const FONT_HEIGHT: usize = 16;
 
 /// Returns the 16-byte bitmap slice for a given ASCII character.

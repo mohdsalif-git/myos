@@ -3,7 +3,7 @@
 // UEFI Graphics Output Protocol (GOP) linear framebuffer manager.
 // Spec: UEFI Specification 2.10 §12.9.
 
-use crate::font::{get_glyph, FONT_HEIGHT, FONT_WIDTH};
+use crate::font::{get_glyph, FONT_WIDTH};
 use crate::uefi_raw::{EfiGraphicsOutputProtocol, EfiGraphicsPixelFormat, EfiPixelBitmask};
 
 pub struct Framebuffer {

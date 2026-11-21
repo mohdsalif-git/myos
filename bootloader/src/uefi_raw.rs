@@ -42,6 +42,7 @@ pub struct EfiTableHeader {
 
 // ── EFI_GRAPHICS_OUTPUT_PROTOCOL (UEFI Spec §12.9) ──────────────────────────
 #[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EfiPixelBitmask {
     pub red_mask: u32,
     pub green_mask: u32,

@@ -30,8 +30,8 @@ use gfx::Framebuffer;
 use serial::{serial_init, serial_write, serial_write_u64};
 use time::{calibrate_tsc, rdtsc, ticks_to_us};
 use uefi_raw::{
-    EfiHandle, EfiStatus, SystemTable, EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID,
-    EFI_GRAPHICS_OUTPUT_PROTOCOL, EFI_SUCCESS,
+    EfiGraphicsOutputProtocol, EfiHandle, EfiStatus, SystemTable,
+    EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID, EFI_SUCCESS,
 };
 
 #[no_mangle]
@@ -99,7 +99,7 @@ pub extern "efiapi" fn efi_main(_image: EfiHandle, st: *mut SystemTable) -> EfiS
     }
 
     let t_gop_located = rdtsc();
-    let gop = gop_ptr as *mut EFI_GRAPHICS_OUTPUT_PROTOCOL;
+    let gop = gop_ptr as *mut EfiGraphicsOutputProtocol;
 
     // ── 5. Initialize Framebuffer & Verify Stride ──────────────────────────
     let mut fb = match unsafe { Framebuffer::from_gop(gop) } {
