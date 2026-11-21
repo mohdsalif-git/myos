@@ -1,0 +1,10 @@
+[package]
+name = "bootloader"
+version = "0.1.0"
+edition = "2021"
+
+# ZERO external crate dependencies.
+# We define UEFI types directly — no proc-macro, no build scripts,
+# so Windows Application Control cannot block anything.
+[dependencies]
+bootinfo = { path = "../bootinfo" }

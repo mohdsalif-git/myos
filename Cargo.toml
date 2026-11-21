@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = [
+    "bootloader",
+    "bootinfo",
+    "kernel-stub",
+    "tools/sign-kernel",
+]
+
+# Profiles live at the workspace root (Cargo ignores them in member crates).
+
+[profile.release]
+opt-level = "z"         # optimize for size (bootloader should be small)
+lto = true              # whole-program link-time optimization
+codegen-units = 1       # single CGU for maximum inlining across the whole crate
+strip = "none"          # keep debug info for GDB; strip manually if needed
+overflow-checks = false # release path: no overflow panics

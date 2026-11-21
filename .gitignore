@@ -1,0 +1,7 @@
+/target
+/keys
+/vars
+*.img
+*.vdi
+*.raw
+*.iso

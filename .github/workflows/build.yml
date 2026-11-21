@@ -1,0 +1,111 @@
+name: Build MyOS Bootloader
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:   # allow manual trigger from GitHub Actions UI
+
+jobs:
+  build-bootloader:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Checkout source ───────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 2. Install Rust stable + UEFI target ─────────────────────────────
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-uefi
+
+      # 3. Cache Cargo registry and build artifacts ───────────────────────
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      # 4. Build the bootloader as a UEFI PE32+ binary ───────────────────
+      - name: Build bootloader (debug)
+        run: cargo build -p bootloader --target x86_64-unknown-uefi
+
+      # 5. Build release binary too (smaller, optimized) ─────────────────
+      - name: Build bootloader (release)
+        run: cargo build -p bootloader --target x86_64-unknown-uefi --release
+
+      # 6. Create the ESP FAT32 disk image ───────────────────────────────
+      # Layout (UEFI Spec §3.5.1.1 — fallback boot path):
+      #   /EFI/BOOT/BOOTX64.EFI   ← firmware looks here by default
+      #   /EFI/MYOS/              ← future: kernel.elf, kernel.sig, boot.cfg
+      - name: Create ESP image (64 MiB FAT32)
+        run: |
+          sudo apt-get install -y dosfstools mtools xorriso
+          # Create 64 MiB blank image
+          dd if=/dev/zero of=build/esp.img bs=1M count=64
+          # Format as FAT32
+          mkfs.fat -F 32 -n "MYOS_ESP" build/esp.img
+          # Create EFI directory structure and copy bootloader
+          mkdir -p build/esp_root/EFI/BOOT
+          mkdir -p build/esp_root/EFI/MYOS
+          cp target/x86_64-unknown-uefi/release/bootloader.efi \
+             build/esp_root/EFI/BOOT/BOOTX64.EFI
+          # Copy files into FAT32 image using mcopy (no mount needed, no root)
+          mcopy -i build/esp.img -s build/esp_root/EFI ::/EFI
+          # Verify the image structure
+          mdir -i build/esp.img ::/EFI/BOOT/
+
+      # 7. Create a bootable ISO (El Torito UEFI variant) ─────────────────
+      # El Torito for UEFI embeds the ESP FAT32 image as the boot image.
+      # This is distinct from legacy BIOS El Torito (which we forbid in spec).
+      # Reference: UEFI Spec §3.3 "Boot from Optical Discs"
+      #            El Torito 1.0 Specification + UEFI extension
+      #
+      # xorriso -eltorito-alt-boot -e EFI/BOOT/bootx64.img -no-emul-boot
+      # tells the firmware to boot from the embedded ESP image (no floppy emulation).
+      - name: Package as bootable ISO (UEFI El Torito)
+        run: |
+          mkdir -p build/iso_root/EFI/BOOT
+          cp build/esp_root/EFI/BOOT/BOOTX64.EFI build/iso_root/EFI/BOOT/BOOTX64.EFI
+          # Embed the ESP image as the UEFI El Torito boot image
+          cp build/esp.img build/iso_root/EFI/BOOT/bootx64.img
+          xorriso -as mkisofs \
+            -o build/myos-b1.iso \
+            -e EFI/BOOT/bootx64.img \
+            -no-emul-boot \
+            -isohybrid-gpt-basdat \
+            build/iso_root
+          echo "ISO size: $(du -sh build/myos-b1.iso)"
+
+      # 8. Upload all artifacts ──────────────────────────────────────────
+      - name: Upload ESP disk image (FAT32 raw)
+        uses: actions/upload-artifact@v4
+        with:
+          name: myos-esp-img
+          path: build/esp.img
+          retention-days: 30
+
+      - name: Upload bootable ISO
+        uses: actions/upload-artifact@v4
+        with:
+          name: myos-b1-iso
+          path: build/myos-b1.iso
+          retention-days: 30
+
+      - name: Upload raw EFI binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: BOOTX64-efi
+          path: target/x86_64-unknown-uefi/release/bootloader.efi
+          retention-days: 30
+
+      # 9. Quick sanity check: verify PE32+ format ────────────────────────
+      - name: Verify PE32+ format
+        run: |
+          file target/x86_64-unknown-uefi/release/bootloader.efi
+          # Must print: PE32+ executable (EFI application) x86-64

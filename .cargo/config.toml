@@ -1,0 +1,20 @@
+# .cargo/config.toml — workspace-level Cargo configuration
+#
+# Sets the default build target for all crates in this workspace that
+# are UEFI applications. Tools (sign-kernel) and host-only libraries
+# (bootinfo, when tested with `cargo test`) must be built with an
+# explicit --target override or in their own workspace.
+#
+# This file is intentionally placed at the WORKSPACE root so that
+# `cargo build` inside `bootloader/` automatically targets UEFI.
+
+[build]
+# Default target for the UEFI bootloader crate.
+# Override for host builds: cargo build --target x86_64-pc-windows-gnu
+target = "x86_64-unknown-uefi"
+
+[target.x86_64-unknown-uefi]
+# rustflags passed to every invocation targeting UEFI.
+# -C panic=abort  — UEFI has no unwinding runtime; abort on panic is correct
+#                   and avoids pulling in the unwind ABI surface.
+rustflags = ["-C", "panic=abort"]
