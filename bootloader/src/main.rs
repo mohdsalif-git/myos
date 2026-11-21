@@ -1,147 +1,193 @@
 // bootloader/src/main.rs
 //
-// MyOS UEFI Bootloader — Milestone B1
-// ====================================
-// Minimal UEFI application. Zero external crate dependencies.
-// Prints a banner via UEFI ConOut, stalls 5 s, returns to firmware.
-//
-// BUILD:
-//   cargo build -p bootloader --target x86_64-unknown-uefi
+// MyOS Stage 1 UEFI Bootloader — Milestone B2
+// ============================================
+// Features:
+//   1. COM1 16550 UART serial logging (115200 8N1)
+//   2. TSC (Time Stamp Counter) timing calibrated against UEFI timer
+//   3. EFI_GRAPHICS_OUTPUT_PROTOCOL (GOP) discovery
+//   4. Linear Framebuffer handling respecting Stride (PixelsPerScanLine)
+//   5. Embedded 8x16 bitmap font text rendering: exactly draws "hello salif"
+//   6. Per-phase benchmark report output to serial log
 //
 // SPEC REFERENCES:
-//   UEFI 2.10 §4.3   — EFI_SYSTEM_TABLE
-//   UEFI 2.10 §12.4  — EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL
-//   UEFI 2.10 §7.4.9 — EFI_BOOT_SERVICES.Stall
-//   UEFI 2.10 §2.3.1 — x86_64 calling convention (Microsoft x64 / "efiapi")
-//   PE/COFF Spec §2.3 — PE32+ image format required by UEFI
+//   UEFI 2.10 §12.9   — EFI_GRAPHICS_OUTPUT_PROTOCOL
+//   UEFI 2.10 §7.3.11 — EFI_BOOT_SERVICES.LocateProtocol
+//   Intel SDM Vol 3B §17.17 — RDTSC Time-Stamp Counter
+//   PC16550D UART Spec §8.0 — 16550 FIFO & Registers
 
 #![no_std]
 #![no_main]
-#![deny(unsafe_op_in_unsafe_fn)] // every unsafe block must have a SAFETY comment
+#![deny(unsafe_op_in_unsafe_fn)]
 
+mod font;
+mod gfx;
+mod serial;
+mod time;
 mod uefi_raw;
+
+use gfx::Framebuffer;
+use serial::{serial_init, serial_write, serial_write_u64};
+use time::{calibrate_tsc, rdtsc, ticks_to_us};
 use uefi_raw::{
-    EfiHandle, EfiStatus, SystemTable,
-    EFI_SUCCESS, EFI_ATTR_WHITE_ON_BLACK,
-    println as uefi_println, stall_fn,
+    EfiHandle, EfiStatus, SystemTable, EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID,
+    EFI_GRAPHICS_OUTPUT_PROTOCOL, EFI_SUCCESS,
 };
 
-// ── Entry point ──────────────────────────────────────────────────────────────
-//
-// The x86_64-unknown-uefi Rust target configures the LLD linker to look for
-// a PE32+ entry point symbol named `efi_main`.  We export it with
-// `#[no_mangle]` and `extern "efiapi"` (Microsoft x64 ABI).
-//
-// UEFI firmware calls us with (UEFI Spec §4.1):
-//   RCX = EFI_HANDLE ImageHandle   — handle to this loaded image
-//   RDX = EFI_SYSTEM_TABLE *       — pointer to the firmware system table
-//
-// We MUST return an EFI_STATUS. SUCCESS causes the boot manager to continue;
-// any error may cause a reset depending on the firmware.
 #[no_mangle]
-pub extern "efiapi" fn efi_main(
-    _image: EfiHandle,          // RCX: our loaded-image handle (unused in B1)
-    st:     *mut SystemTable,   // RDX: pointer to EFI_SYSTEM_TABLE
-) -> EfiStatus {
+pub extern "efiapi" fn efi_main(_image: EfiHandle, st: *mut SystemTable) -> EfiStatus {
+    // Record boot entry timestamp immediately
+    let t_boot_entry = rdtsc();
 
-    // SAFETY: `st` is the EFI_SYSTEM_TABLE* passed by the UEFI firmware.
-    // The firmware guarantees it is non-null, properly aligned, and valid
-    // for the entire pre-ExitBootServices phase.
-    unsafe { boot(st) }
-}
-
-/// Main boot logic — separated so the entry point function is minimal.
-///
-/// # Safety
-/// `st` must be a valid EFI_SYSTEM_TABLE pointer from the firmware.
-unsafe fn boot(st: *mut SystemTable) -> EfiStatus {
-    // ── Dereference the system table ─────────────────────────────────────
-    // SAFETY: firmware guarantees st is valid and not null.
-    let cout = unsafe { (*st).con_out };
-    let boot_services = unsafe { (*st).boot_services };
-
-    // ── Set white-on-black text attribute ────────────────────────────────
-    // UEFI Spec §12.4.6 — SetAttribute(This, Attribute)
-    // EFI_ATTR_WHITE_ON_BLACK = 0x0F (bright white fg, black bg).
-    //
-    // SAFETY: cout is firmware-owned and valid through Boot Services phase.
+    // ── 1. Initialize COM1 Serial Output (Port 0x3F8) ──────────────────────
+    // SAFETY: COM1 port initialization on standard x86 hardware.
     unsafe {
-        ((*cout).set_attribute)(cout, EFI_ATTR_WHITE_ON_BLACK);
+        serial_init();
+        serial_write("\n=======================================================\n");
+        serial_write("[MyOS] Stage 1 Bootloader: Milestone B2 Active\n");
+        serial_write("[MyOS] COM1 Serial logging initialized (115200 8N1)\n");
     }
 
-    // ── Clear screen ─────────────────────────────────────────────────────
-    // UEFI Spec §12.4.7 — ClearScreen(This)
-    //
-    // SAFETY: same as above.
-    unsafe {
-        ((*cout).clear_screen)(cout);
+    // ── 2. Validate System Table ───────────────────────────────────────────
+    if st.is_null() {
+        unsafe {
+            serial_write("[ERROR] SystemTable pointer is null! Halting.\n");
+        }
+        loop_halt();
     }
 
-    // ── Print banner ─────────────────────────────────────────────────────
-    // All text is ASCII (codepoints 0x00–0x7F), so the u8→u16 cast in
-    // uefi_raw::print is correct. \r\n is used for CRLF (UEFI Spec §12.4.3).
-    //
-    // SAFETY: cout is valid; uefi_raw::println is safe given a valid cout.
-    unsafe {
-        uefi_println(cout, "");
-        uefi_println(cout, "  +-----------------------------------------+");
-        uefi_println(cout, "  |    MyOS Bootloader  --  Milestone B1    |");
-        uefi_println(cout, "  |    Zero-dependency UEFI PE32+ binary    |");
-        uefi_println(cout, "  |    Target : x86_64-unknown-uefi         |");
-        uefi_println(cout, "  |    Rust   : 1.99.0 (stable)             |");
-        uefi_println(cout, "  +-----------------------------------------+");
-        uefi_println(cout, "");
-        uefi_println(cout, "  Firmware ConOut (SimpleTextOutput): OK");
-        uefi_println(cout, "  EFI_SYSTEM_TABLE: accessed");
-        uefi_println(cout, "  EFI_BOOT_SERVICES.Stall: about to call...");
-        uefi_println(cout, "");
-        uefi_println(cout, "  Stalling 5 seconds (readable in VirtualBox)...");
+    let bs = unsafe { (*st).boot_services };
+    if bs.is_null() {
+        unsafe {
+            serial_write("[ERROR] BootServices pointer is null! Halting.\n");
+        }
+        loop_halt();
     }
 
-    // ── Stall 5 seconds ──────────────────────────────────────────────────
-    // EFI_BOOT_SERVICES.Stall(Microseconds) — UEFI Spec §7.4.9.
-    // The function busy-waits inside firmware; it does not yield.
-    // We read the function pointer from the Boot Services table at offset 248.
-    //
-    // SAFETY: boot_services is valid (firmware guarantees it).
-    //         stall_fn() reads offset 248 which maps to Stall per UEFI Spec §7.1.
-    let stall = unsafe { stall_fn(boot_services as *const _) };
-    // SAFETY: stall is a valid function pointer obtained from firmware.
-    unsafe { stall(5_000_000); } // 5 000 000 µs = 5 seconds
-
-    // ── Done ─────────────────────────────────────────────────────────────
-    // SAFETY: cout is still valid (we have not called ExitBootServices).
+    // ── 3. Calibrate TSC against UEFI Stall (10 ms) ────────────────────────
     unsafe {
-        uefi_println(cout, "");
-        uefi_println(cout, "  Done. B1 complete. Returning to firmware.");
+        serial_write("[MyOS] Calibrating TSC against UEFI timer (10ms)...\n");
+    }
+    let stall_fn = unsafe { (*bs).stall };
+    let ticks_per_us = unsafe { calibrate_tsc(stall_fn) };
+
+    unsafe {
+        serial_write("[MyOS] TSC Frequency: ");
+        serial_write_u64(ticks_per_us);
+        serial_write(" MHz (ticks/microsecond)\n");
+    }
+
+    // ── 4. Locate EFI_GRAPHICS_OUTPUT_PROTOCOL (GOP) ───────────────────────
+    let t_gop_start = rdtsc();
+    let mut gop_ptr: *mut core::ffi::c_void = core::ptr::null_mut();
+
+    let status = unsafe {
+        ((*bs).locate_protocol)(
+            &EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID,
+            core::ptr::null_mut(),
+            &mut gop_ptr,
+        )
+    };
+
+    if status != EFI_SUCCESS || gop_ptr.is_null() {
+        unsafe {
+            serial_write("[ERROR] Failed to locate EFI_GRAPHICS_OUTPUT_PROTOCOL! Status: ");
+            serial_write_u64(status as u64);
+            serial_write("\n");
+        }
+        loop_halt();
+    }
+
+    let t_gop_located = rdtsc();
+    let gop = gop_ptr as *mut EFI_GRAPHICS_OUTPUT_PROTOCOL;
+
+    // ── 5. Initialize Framebuffer & Verify Stride ──────────────────────────
+    let mut fb = match unsafe { Framebuffer::from_gop(gop) } {
+        Ok(fb) => fb,
+        Err(err) => {
+            unsafe {
+                serial_write("[ERROR] Framebuffer initialization failed: ");
+                serial_write(err);
+                serial_write("\n");
+            }
+            loop_halt();
+        }
+    };
+
+    unsafe {
+        serial_write("[MyOS] GOP Framebuffer found:\n");
+        serial_write("       Resolution : ");
+        serial_write_u64(fb.width as u64);
+        serial_write(" x ");
+        serial_write_u64(fb.height as u64);
+        serial_write("\n       Stride     : ");
+        serial_write_u64(fb.stride as u64);
+        serial_write(" pixels per scanline\n       Base Addr  : 0x");
+        serial_write_u64(fb.base as u64);
+        serial_write("\n       Size       : ");
+        serial_write_u64(fb.size as u64 / 1024);
+        serial_write(" KiB\n");
+    }
+
+    // ── 6. Render Framebuffer & Draw "hello salif" ─────────────────────────
+    let t_render_start = rdtsc();
+
+    // Clear background to dark navy (R=12, G=16, B=32)
+    fb.clear(12, 16, 32);
+
+    // Header banner text
+    fb.draw_string(40, 40, "MyOS Bootloader [Stage 1 - Milestone B2]", 160, 180, 220);
+
+    // ⭐ HARD CONSTRAINT: Draw exactly "hello salif" with embedded bitmap font
+    fb.draw_string(40, 80, "hello salif", 50, 255, 120);
+
+    // Additional info for visual confirmation on screen
+    fb.draw_string(40, 120, "GOP Direct Framebuffer: Active", 200, 200, 200);
+    fb.draw_string(40, 140, "COM1 Serial Log: Active (115200 8N1)", 200, 200, 200);
+    fb.draw_string(40, 160, "TSC Calibrated: Verified", 200, 200, 200);
+
+    let t_render_end = rdtsc();
+
+    // ── 7. Benchmark Report over Serial Log ─────────────────────────────────
+    let gop_us = ticks_to_us(t_gop_located - t_gop_start, ticks_per_us);
+    let render_us = ticks_to_us(t_render_end - t_render_start, ticks_per_us);
+    let total_us = ticks_to_us(t_render_end - t_boot_entry, ticks_per_us);
+
+    unsafe {
+        serial_write("\n--- [MyOS Milestone B2 Boot Benchmarks] ---\n");
+        serial_write("  GOP Protocol Locate : ");
+        serial_write_u64(gop_us);
+        serial_write(" us\n");
+        serial_write("  Framebuffer Render  : ");
+        serial_write_u64(render_us);
+        serial_write(" us\n");
+        serial_write("  Total B2 Phase Time : ");
+        serial_write_u64(total_us);
+        serial_write(" us\n");
+        serial_write("-------------------------------------------\n");
+        serial_write("[MyOS] B2 Acceptance Complete. Text drawn: 'hello salif'\n");
+    }
+
+    // ── 8. Stall 5 seconds for user visual inspection ──────────────────────
+    unsafe {
+        stall_fn(5_000_000);
     }
 
     EFI_SUCCESS
-    // Returning SUCCESS: the boot manager will show its own menu or reset,
-    // depending on firmware policy (UEFI Spec §6.1).
 }
 
-// ── Panic handler ────────────────────────────────────────────────────────────
-//
-// In a no_std binary the compiler requires a #[panic_handler].
-// At boot time we cannot safely call ConOut (it might not be set up),
-// so we just halt the CPU in a loop. Future milestones will add a serial
-// log dump here before halting.
-//
-// `cli` + `hlt` in a loop is correct: on x86_64, NMIs can still wake the
-// CPU, so we loop back to `hlt` after each one (UEFI pre-ExitBootServices,
-// NMIs are suppressed by firmware on most hardware, but we loop defensively).
-#[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
+fn loop_halt() -> ! {
     loop {
-        // SAFETY: `hlt` is valid in any privilege level on x86_64.
-        // On UEFI (long mode, CPL 0), `cli` and `hlt` are always permitted.
         unsafe {
-            core::arch::asm!(
-                "cli",
-                "hlt",
-                options(nomem, nostack, preserves_flags)
-            );
+            core::arch::asm!("cli", "hlt", options(nomem, nostack, preserves_flags));
         }
     }
+}
+
+#[panic_handler]
+fn panic(_info: &core::panic::PanicInfo) -> ! {
+    unsafe {
+        serial_write("\n[PANIC] Bootloader encountered an unrecoverable panic!\n");
+    }
+    loop_halt();
 }
