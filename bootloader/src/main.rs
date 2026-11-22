@@ -20,6 +20,7 @@
 #![no_main]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+mod crypto;
 mod elf;
 mod font;
 mod fs;
@@ -46,6 +47,15 @@ const KERNEL_PATH: &[u16] = &[
     b'\\' as u16, b'K' as u16, b'E' as u16, b'R' as u16, b'N' as u16,
     b'E' as u16, b'L' as u16, b'.' as u16, b'E' as u16, b'L' as u16,
     b'F' as u16, 0,
+];
+
+// UCS-2 encoded path: \EFI\MYOS\KERNEL.SIG with null terminator
+const SIG_PATH: &[u16] = &[
+    b'\\' as u16, b'E' as u16, b'F' as u16, b'I' as u16,
+    b'\\' as u16, b'M' as u16, b'Y' as u16, b'O' as u16, b'S' as u16,
+    b'\\' as u16, b'K' as u16, b'E' as u16, b'R' as u16, b'N' as u16,
+    b'E' as u16, b'L' as u16, b'.' as u16, b'S' as u16, b'I' as u16,
+    b'G' as u16, 0,
 ];
 
 #[no_mangle]
@@ -114,7 +124,7 @@ pub extern "efiapi" fn efi_main(image: EfiHandle, st: *mut SystemTable) -> EfiSt
     fb.draw_string(40, 80, "hello salif", 50, 255, 120);
     fb.draw_string(40, 120, "Loading \\EFI\\MYOS\\KERNEL.ELF...", 200, 200, 200);
 
-    // ── 5. Open ESP Filesystem & Read Kernel ELF ───────────────────────────
+    // ── 5. Open ESP Filesystem & Read Kernel Files ─────────────────────────
     let t_fs_start = rdtsc();
     let fs = match unsafe { EspFileSystem::open(image, bs) } {
         Ok(fs) => fs,
@@ -142,14 +152,50 @@ pub extern "efiapi" fn efi_main(image: EfiHandle, st: *mut SystemTable) -> EfiSt
         }
     };
 
+    let (sig_buf, sig_size) = match unsafe { fs.read_file(SIG_PATH, bs) } {
+        Ok(res) => res,
+        Err(err) => {
+            unsafe {
+                serial_write("[ERROR] Failed to read signature file: ");
+                serial_write(err);
+                serial_write("\n");
+            }
+            fb.draw_string(40, 150, "FAIL: Kernel Signature Not Found (FAIL CLOSED)", 255, 50, 50);
+            loop_halt();
+        }
+    };
+
     let t_fs_end = rdtsc();
     unsafe {
         serial_write("[MyOS] Read \\EFI\\MYOS\\KERNEL.ELF: ");
         serial_write_u64(kernel_size as u64);
         serial_write(" bytes\n");
+        serial_write("[MyOS] Read \\EFI\\MYOS\\KERNEL.SIG: ");
+        serial_write_u64(sig_size as u64);
+        serial_write(" bytes\n");
     }
 
-    // ── 6. Parse and Load Static-PIE ELF64 ──────────────────────────────────
+    // ── 6. Cryptographic Verification (Fail-Closed) ────────────────────────
+    let sig_bytes = unsafe { core::slice::from_raw_parts(sig_buf, sig_size) };
+    let _parsed_sig = match crypto::parse_signature(sig_bytes) {
+        Ok(s) => {
+            unsafe {
+                serial_write("[MyOS] Signature header & magic verified: OK\n");
+            }
+            s
+        }
+        Err(err) => {
+            unsafe {
+                serial_write("[SECURITY ALERT] Signature validation failed: ");
+                serial_write(err);
+                serial_write("\n");
+            }
+            fb.draw_string(40, 150, "SECURITY ALERT: Signature Verification Failed", 255, 50, 50);
+            loop_halt();
+        }
+    };
+
+    // ── 7. Parse and Load Static-PIE ELF64 ──────────────────────────────────
     let t_elf_start = rdtsc();
     let kernel_bytes = unsafe { core::slice::from_raw_parts(kernel_buf, kernel_size) };
     let loaded_elf = match unsafe { LoadedElf::load(kernel_bytes, bs) } {

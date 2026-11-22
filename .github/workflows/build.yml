@@ -36,14 +36,31 @@ jobs:
         run: |
           RUSTFLAGS="-C relocation-model=pie" cargo build -p kernel-stub --target x86_64-unknown-none --release
 
-      # 5. Build the bootloader as a UEFI PE32+ binary ───────────────────
+      # 5. Generate dummy signature KERNEL.SIG (104 bytes) ──────────────
+      - name: Create KERNEL.SIG detached signature
+        run: |
+          mkdir -p build/esp_root/EFI/MYOS
+          # 4 bytes magic "MYOS" + 4 bytes version 1 (LE) + 32 bytes digest + 64 bytes sig = 104 bytes
+          python3 -c '
+          magic = b"MYOS"
+          version = (1).to_bytes(4, "little")
+          digest = b"\x00" * 32
+          sig = b"\x00" * 64
+          data = magic + version + digest + sig
+          with open("build/esp_root/EFI/MYOS/KERNEL.SIG", "wb") as f:
+              f.write(data)
+          '
+          ls -la build/esp_root/EFI/MYOS/KERNEL.SIG
+
+      # 6. Build the bootloader as a UEFI PE32+ binary ───────────────────
       - name: Build bootloader (release)
         run: cargo build -p bootloader --target x86_64-unknown-uefi --release
 
-      # 6. Create the ESP FAT32 disk image ───────────────────────────────
+      # 7. Create the ESP FAT32 disk image ───────────────────────────────
       # Layout (UEFI Spec §3.5.1.1 — fallback boot path):
       #   /EFI/BOOT/BOOTX64.EFI   <- firmware looks here by default
       #   /EFI/MYOS/KERNEL.ELF    <- Stage 2 kernel ELF binary
+      #   /EFI/MYOS/KERNEL.SIG    <- Detached cryptographic signature
       - name: Create ESP image (64 MiB FAT32)
         run: |
           sudo apt-get install -y dosfstools mtools xorriso
@@ -54,7 +71,6 @@ jobs:
           mkfs.fat -F 32 -n "MYOS_ESP" build/esp.img
           # Create EFI directory structure
           mkdir -p build/esp_root/EFI/BOOT
-          mkdir -p build/esp_root/EFI/MYOS
           # Copy bootloader to fallback path
           cp target/x86_64-unknown-uefi/release/bootloader.efi \
              build/esp_root/EFI/BOOT/BOOTX64.EFI
@@ -66,13 +82,14 @@ jobs:
           # Verify the image structure
           mdir -i build/esp.img ::/EFI/MYOS/
 
-      # 7. Create a bootable ISO (El Torito UEFI variant) ─────────────────
+      # 8. Create a bootable ISO (El Torito UEFI variant) ─────────────────
       - name: Package as bootable ISO (UEFI El Torito)
         run: |
           mkdir -p build/iso_root/EFI/BOOT
           mkdir -p build/iso_root/EFI/MYOS
           cp build/esp_root/EFI/BOOT/BOOTX64.EFI build/iso_root/EFI/BOOT/BOOTX64.EFI
           cp build/esp_root/EFI/MYOS/KERNEL.ELF build/iso_root/EFI/MYOS/KERNEL.ELF
+          cp build/esp_root/EFI/MYOS/KERNEL.SIG build/iso_root/EFI/MYOS/KERNEL.SIG
           # Embed the ESP image as the UEFI El Torito boot image
           cp build/esp.img build/iso_root/EFI/BOOT/bootx64.img
           xorriso -as mkisofs \
